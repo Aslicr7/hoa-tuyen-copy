@@ -1,0 +1,14 @@
+[Unit]
+Description=Hoa Tuyen game server (web + online)
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/hoatuyen-online
+ExecStart=/usr/bin/env node server.mjs
+Environment=PORT=8787
+# Environment=ACCESS_CODE=123456
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
