@@ -3,7 +3,7 @@ Description=Hoa Tuyen game server (web + online)
 After=network.target
 
 [Service]
-WorkingDirectory=/opt/hoatuyen-online
+WorkingDirectory=/var/www/hoatuyen
 ExecStart=/usr/bin/env node server.mjs
 Environment=PORT=8787
 Restart=always
