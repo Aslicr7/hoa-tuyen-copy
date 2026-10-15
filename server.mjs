@@ -1,6 +1,6 @@
 // Hỏa Tuyến: máy chủ tự dựng (trang web + chơi online) trên một cổng duy nhất.
 //   node server.mjs            → http://<ip>:8787  (đổi cổng: PORT=9000 node server.mjs)
-// Tuỳ chọn: ACCESS_CODE=abc123 bắt người chơi nhập mã vào chơi; MAX_PLAYERS, MAX_ROOMS.
+// Tuỳ chọn: MAX_PLAYERS, MAX_ROOMS.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -15,11 +15,12 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '0.0.0.0';
-const ACCESS_CODE = process.env.ACCESS_CODE || '';
 const MAX_PLAYERS = Number(process.env.MAX_PLAYERS) || 64;
 const MAX_ROOMS = Number(process.env.MAX_ROOMS) || 16;
 const PROTOCOL = 17;
 const TICK_MS = 1000 / 60;
+const ROOM_MAX = 10; // số người tối đa trong một phòng (không tính bot)
+const BOTS_MAX = 8; // số bot tối đa mỗi bên
 
 // ---------------------------------------------------------------- web page
 const TYPES = {
@@ -75,7 +76,7 @@ const refuse = (c, reason) => send(c, { type: 'refused', reason });
 function roomSummary(r) {
   return {
     id: r.id, name: r.settings.name, mode: r.settings.mode, mapId: r.settings.mapId,
-    players: r.members.length, capacity: r.settings.size * 2, playing: !!r.match,
+    players: r.members.length, capacity: ROOM_MAX, playing: !!r.match,
     locked: r.password !== '', midJoin: r.settings.midJoin,
   };
 }
@@ -86,6 +87,9 @@ function roomView(r, you) {
     id: r.id,
     settings: { ...r.settings, locked: r.password !== '' },
     members: r.members.map((m) => ({ id: m.id, name: m.name, team: m.team, host: m.id === r.host, ready: m.ready, inMatch: m.inMatch })),
+    bots: r.bots,
+    maxMembers: ROOM_MAX,
+    maxBots: BOTS_MAX,
     you,
     playing: !!r.match,
   };
@@ -105,21 +109,17 @@ function cleanSettings(s, old) {
   if (!mode || !ROOM_MAPS.includes(s.mapId)) return null;
   const targets = mode === 'elimination' ? ROUNDS.winOptions : TEAM.scoreOptions;
   if (!targets.includes(s.target)) return null;
-  const size = Math.floor(Number(s.size));
-  if (!(size >= ONLINE.sizeMin && size <= ONLINE.sizeMax)) return null;
   const name = String(s.name ?? '').replace(/\s+/g, ' ').trim().slice(0, ONLINE.nameMax) || old?.name || 'Phòng';
   let password = old ? old.password : '';
   if (typeof s.password === 'string') password = s.password.slice(0, ONLINE.passwordMax);
-  return { settings: { name, mode, mapId: s.mapId, target: s.target, size, midJoin: !!s.midJoin, bots: !!s.bots }, password };
+  return { settings: { name, mode, mapId: s.mapId, target: s.target, midJoin: !!s.midJoin }, password };
 }
 
 function sideCount(r, team) { return r.members.filter((m) => m.team === team).length; }
+// Phòng không chia chỗ theo bên: còn chỗ là vào, người mới sang bên ít người hơn (tính cả bot).
 function freeSide(r) {
-  const a = sideCount(r, 0), b = sideCount(r, 1), size = r.settings.size;
-  if (a >= size && b >= size) return -1;
-  if (a >= size) return 1;
-  if (b >= size) return 0;
-  return a <= b ? 0 : 1;
+  if (r.members.length >= ROOM_MAX) return -1;
+  return sideCount(r, 0) + r.bots[0] <= sideCount(r, 1) + r.bots[1] ? 0 : 1;
 }
 
 function enterRoom(c, r) {
@@ -153,6 +153,19 @@ function leaveRoom(c, quiet = false) {
 }
 
 // ---------------------------------------------------------------- match
+// Giữ đúng số bot chủ phòng chọn cho mỗi bên, dù người vào hay ra giữa trận
+// (thay cho botFill của game, vốn lấp bot cho đủ một cỡ đội cố định).
+function keepBots(server, bots) {
+  for (const team of [0, 1]) {
+    let extra = server.bots.filter((b) => server.game.players.get(b.id)?.team === team).length - bots[team];
+    for (let i = server.bots.length - 1; i >= 0 && extra > 0; i--) {
+      if (server.game.players.get(server.bots[i].id)?.team === team) { server.removeBot(i); extra--; }
+    }
+  }
+  const humans = server.humanCount();
+  server.fillWithBots(humans[0] + bots[0], humans[1] + bots[1]);
+}
+
 function startMatch(r) {
   const s = r.settings;
   const opts = { seed: Math.floor(Math.random() * 1e6), mode: s.mode, ...(s.mode === 'elimination' ? { roundsToWin: s.target } : { scoreLimit: s.target }) };
@@ -160,9 +173,18 @@ function startMatch(r) {
   server.sendEvery = ONLINE.snapshotEvery;
   server.deltas = true;
   server.inputsAsTheyCome = true;
-  server.botFill = s.bots ? s.size : null;
+  const bots = [...r.bots];
+  server.balanceBots = () => keepBots(server, bots);
   server.balanceBots();
-  const match = { server, timer: null, endedAt: 0, next: performance.now() };
+  const match = { server, bots, forfeit: null, timer: null, endedAt: 0, next: performance.now() };
+  // Kết thúc sớm (xem endIfSideEmpty) phải xảy ra trong một nhịp của trận như lúc hết giờ:
+  // gọi endMatch giữa hai nhịp thì sự kiện kết thúc bị xoá ở đầu nhịp sau, máy người chơi không nhận được.
+  const game = server.game, step = game.step.bind(game);
+  game.step = (inputs) => {
+    const events = step(inputs);
+    if (match.forfeit !== null && game.match.phase !== 'ended') game.endMatch(match.forfeit);
+    return events;
+  };
   r.match = match;
   for (const m of r.members) { m.ready = false; joinMatch(m); }
   match.timer = setInterval(() => tickMatch(r), 4);
@@ -183,6 +205,9 @@ function tickMatch(r) {
   }
   if (now - match.next > 250) match.next = now; // máy chủ bị nghẽn: bỏ qua thay vì đuổi theo
   if (match.server.game.match.phase === 'ended') {
+    // Trận đã xong thì nhịp đứng yên; nếu dừng ở nhịp lẻ thì lịch gửi 2 nhịp một lần không bao giờ tới
+    // và người chơi không thấy bảng kết quả. Gửi mỗi nhịp cho chắc.
+    match.server.sendEvery = 1;
     match.endedAt ||= now;
     if (now - match.endedAt > ONLINE.resultSeconds * 1000) finishMatch(r);
   }
@@ -210,6 +235,16 @@ function leaveMatch(c) {
   c.link = null;
   const r = c.room;
   if (r?.match && !r.members.some((m) => m.inMatch)) finishMatch(r);
+  else if (r?.match) endIfSideEmpty(r);
+}
+
+// Một bên không còn ai trong trận (cả người lẫn bot): bên còn lại thắng, trận kết thúc sớm.
+// Mọi người vẫn thấy bảng kết quả như thường rồi tự về phòng.
+function endIfSideEmpty(r) {
+  const match = r.match;
+  if (match.forfeit !== null || match.server.game.match.phase === 'ended') return;
+  const left = [0, 1].map((t) => match.bots[t] > 0 || r.members.some((m) => m.inMatch && m.team === t));
+  if (left[0] !== left[1]) match.forfeit = left[0] ? 0 : 1; // nhịp kế tiếp sẽ kết thúc trận
 }
 
 function stopMatch(r) {
@@ -248,7 +283,6 @@ function cleanInput(cmd) {
 
 function onHello(c, msg) {
   if (msg.version !== PROTOCOL) return refuse(c, 'version');
-  if (ACCESS_CODE && String(msg.code ?? '') !== ACCESS_CODE) return refuse(c, 'code');
   const name = String(msg.name ?? '').replace(/\s+/g, ' ').trim();
   if (name.length < 1 || name.length > ONLINE.playerNameMax) return refuse(c, 'name-invalid');
   const lower = name.toLowerCase();
@@ -284,7 +318,7 @@ function onMessage(c, msg) {
       if (rooms.size >= MAX_ROOMS) return refuse(c, 'too-many-rooms');
       const clean = cleanSettings(msg.settings, null);
       if (!clean) return refuse(c, 'bad-settings');
-      const room = { id: nextRoomId++, ...clean, members: [], host: c.id, match: null };
+      const room = { id: nextRoomId++, ...clean, bots: [0, 0], members: [], host: c.id, match: null };
       rooms.set(room.id, room);
       return enterRoom(c, room);
     }
@@ -313,7 +347,7 @@ function onMessage(c, msg) {
       if (!isHost) return refuse(c, 'not-host');
       if (r.match) return refuse(c, 'playing');
       const clean = cleanSettings(msg.settings, { name: r.settings.name, password: r.password });
-      if (!clean || sideCount(r, 0) > clean.settings.size || sideCount(r, 1) > clean.settings.size) return refuse(c, 'bad-settings');
+      if (!clean) return refuse(c, 'bad-settings');
       r.settings = clean.settings;
       r.password = clean.password;
       pushRoom(r);
@@ -323,9 +357,16 @@ function onMessage(c, msg) {
       if (!r) return refuse(c, 'no-room');
       const team = msg.team === 1 ? 1 : 0;
       if (c.inMatch || team === c.team) return;
-      if (c.ready) return refuse(c, 'ready-locked');
-      if (sideCount(r, team) >= r.settings.size) return refuse(c, 'side-full');
       c.team = team;
+      return pushRoom(r);
+    }
+    case 'bots': {
+      if (!r) return refuse(c, 'no-room');
+      if (!isHost) return refuse(c, 'not-host');
+      if (r.match) return refuse(c, 'playing');
+      const count = Math.floor(Number(msg.count));
+      if (!(count >= 0 && count <= BOTS_MAX)) return refuse(c, 'bad-settings');
+      r.bots[msg.team === 1 ? 1 : 0] = count;
       return pushRoom(r);
     }
     case 'ready':
@@ -345,7 +386,7 @@ function onMessage(c, msg) {
       if (!isHost) return refuse(c, 'not-host');
       if (r.match) return;
       if (r.members.some((m) => m.id !== r.host && !m.ready)) return refuse(c, 'not-ready');
-      if (!r.settings.bots && sideCount(r, 0) !== sideCount(r, 1)) return refuse(c, 'uneven');
+      if ([0, 1].some((t) => sideCount(r, t) + r.bots[t] === 0)) return refuse(c, 'empty-side');
       return startMatch(r);
     }
     case 'joinMatch': {
@@ -393,5 +434,4 @@ setInterval(() => {
 
 web.listen(PORT, HOST, () => {
   console.log(`Hỏa Tuyến đang chạy: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}  (online: /play)`);
-  if (ACCESS_CODE) console.log('Đang bật mã vào chơi (ACCESS_CODE).');
 });

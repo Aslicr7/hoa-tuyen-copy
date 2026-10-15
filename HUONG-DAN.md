@@ -18,9 +18,9 @@ máy chủ đó không còn nhận kết nối. Gói game cũng không có code 
 - Menu không vẽ cảnh 3D và không chạy trận bot ngầm nữa (trước đây menu còn nặng hơn lúc chơi).
 - Mặc định tắt bóng đổ và khử răng cưa, độ nét giới hạn 1×. Máy khỏe có thể bật lại trong Cài đặt → Hình ảnh.
 - Bỏ viền mực quanh nhân vật/đồ vật: số lệnh vẽ giảm một nửa.
-- Phòng mới mặc định 2 đấu 2 (vẫn chỉnh được tới 8 đấu 8).
+- Tạo phòng không cần chọn số người: phòng chứa tối đa 10 người, ai cũng tự đổi bên được, hai bên lệch người vẫn chơi được. Chủ phòng thêm/bớt bot cho từng bên (0–8 bot mỗi bên).
 - Bản đồ nhỏ hiện cả đối thủ (màu đội họ), không chỉ đồng đội. Người ở gần là chấm; người ở ngoài vòng tròn là mũi tên ở mép, chỉ về phía họ.
-- Không tải ảnh/âm thanh bị thiếu trong gói gốc.
+- Đã bổ sung các file gói gốc còn thiếu (lấy từ hoatuyen.vercel.app): âm thanh súng/dao (`public/cf/sounds`), biểu tượng hạ gục (`public/cf/killmarks`), tiếng tàu (`public/sounds/train`) và ảnh bản đồ (`public/maps`).
 
 ## Thử trên máy mình
 
@@ -57,18 +57,19 @@ Mở http://localhost:8787, nhập tên → **Vào sảnh**.
 
 Mọi người mở http://103.249.116.187:8787 → nhập tên → **Vào sảnh**.
 Một người **Tạo phòng**, những người khác chọn phòng rồi **Vào phòng** (hoặc **Vào nhanh**).
-Chọn đội, người khác bấm **Sẵn sàng**, chủ phòng bấm **Bắt đầu**. Phòng mới mặc định 2 đấu 2.
+Chọn đội, người khác bấm **Sẵn sàng**, chủ phòng bấm **Bắt đầu**. Mỗi phòng tối đa 10 người.
 
-- 2 đấu 2: mỗi bên 2 người. Để "Thêm bot" = Có thì bot lấp các chỗ trống cho đủ cỡ đội.
-- 4 người cùng đội đánh bot: dồn cả 4 vào một bên, bật "Thêm bot".
-- Tắt bot thì hai đội phải đông bằng nhau mới bắt đầu được.
+- Bấm tên đội (**Sang đội này**) để đổi bên, lúc nào cũng được (trừ khi đang trong trận).
+- Chủ phòng bấm **−** / **+** ở dòng bot của mỗi bên để bớt/thêm bot (0–8 bot mỗi bên). Số bot giữ nguyên dù có người vào/ra giữa trận.
+- Hai bên lệch người vẫn bắt đầu được, chỉ cần mỗi bên có ít nhất 1 người hoặc 1 bot.
+- Giữa trận, nếu một bên không còn ai (người đã thoát hết và bên đó không có bot) thì trận kết thúc sớm, bên còn lại thắng.
+- 4 người cùng đội đánh bot: dồn cả 4 vào một bên, thêm bot cho bên kia.
 
 ## Tuỳ chỉnh (biến môi trường, sửa trong `hoatuyen.service`)
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
 | `PORT` | 8787 | Cổng web + online |
-| `ACCESS_CODE` | (trống) | Bản nhẹ đã ẩn ô nhập mã, nên đừng đặt biến này (đặt vào thì không ai vào được) |
 | `MAX_ROOMS` | 16 | Số phòng tối đa |
 | `MAX_PLAYERS` | 64 | Số người online tối đa |
 
